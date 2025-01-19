@@ -14,6 +14,7 @@ from metpy.calc import relative_humidity_from_specific_humidity
 from metpy.units import units
 import calendar
 import asyncio
+import uuid
 
 
 
@@ -165,6 +166,11 @@ def deaccum_precip(ds):
 
 
 def extract_hour(year, month, day, hour):
+
+        # use this uuid to prevent any name collisions when we cross the 00 on the 25th hour with the next day's data
+        # # each day will have a unique uuid        
+        uid = uuid.uuid4()
+
         fstname = f'/fs/site6/eccc/mrd/rpnenv/smsh001/arcsfc/{year}/{str(month).zfill(2)}/{str(day).zfill(2)}/lam/nat.eta/{year}{str(month).zfill(2)}{str(day).zfill(2)}00_{str(hour).zfill(3)}'
         print(fstname)
         fst = xr.open_mfdataset(fstname)
@@ -182,7 +188,7 @@ def extract_hour(year, month, day, hour):
         # UU:  Wind speed (kts)
         # VV:  Wind speed (kts)
         # this list needs at least 1 surface variable for the coord situation to make sense in the merge
-        variables = ['rotated_pole', 'TT', 'GZ', 'FI', 'FB', 'FSD', 'FSF', 'PR', 'RN', 'P0', 'HU', 'TT', 'GZ']
+        variables = ['rotated_pole', 'GZ', 'TT', 'FI', 'FB', 'FSD', 'FSF', 'PR', 'RN', 'P0', 'HU']
         variables_wind = ['UU', 'VV']
 
         # Take wind at 40m (0.985) but everything else at surface 1m
@@ -223,23 +229,25 @@ def extract_hour(year, month, day, hour):
             if v == 'rotated_pole':
                 continue   
 
-            fname = f'/home/chm003/project/hrdps/{date}-{v}.nc'
+            fname = f'/home/chm003/project/hrdps/{date}-{v}-{uid}.nc'
+            fname_eps4326 = f'/home/chm003/project/hrdps/{date}-{v}-{uid}-eps4326.nc'
             fst[v].to_netcdf(fname)
 
             subprocess.run(['gdalwarp', 
                             '-t_srs', f'EPSG:4326', 
-                            f"NETCDF:{fname}:{v}", f"/home/chm003/project/hrdps/{date}-{v}-eps4326.nc"])
+                            f"NETCDF:{fname}:{v}", fname_eps4326])
             
             os.remove(fname)
 
-            ds = xr.open_mfdataset(f"/home/chm003/project/hrdps/{date}-{v}-eps4326.nc")
+            ds = xr.open_mfdataset(fname_eps4326)
             ds = ds.rename_vars({'Band1':v})
             ds = ds.rename({"lat":"latitude","lon":"longitude"})
             ds = ds.expand_dims(dim="time").assign_coords(time=pd.to_datetime(time.values))
 
             all.append(ds)
 
-            files_to_remove.append(f"/home/chm003/project/hrdps/{date}-{v}-eps4326.nc")
+            # remove this file later once we've finished the delayed append
+            files_to_remove.append(fname_eps4326)
 
         ds = xr.merge(all)
 
@@ -253,43 +261,61 @@ def extract_hour(year, month, day, hour):
             ds = specific_to_rh(ds) #computes RH
 
         if 'GZ' in ds.data_vars:
-            ds['GZ'] = ds.GZ*10.0 #dam -> m
+            ds['GZ'] = ds.GZ*10.0 # dam -> m
 
         ds = set_CF_standard_names(ds) # sets all the CF names into attrs
         ds = set_CF_encoding(ds) # sets CF coord encoding
-
         ds.attrs = {"Conventions": "CF-1.7"}
         
-        to_netcdf_kwargs = gen_nc_kwargs(ds)
+        # to_netcdf_kwargs = gen_nc_kwargs(ds)
         # ds contains delayed objects, so the temp files need to remain until here
-        ds.to_netcdf(f"/home/chm003/project/hrdps/{date}.nc", **to_netcdf_kwargs)
 
-        # all_day.append(f"/home/chm003/project/hrdps/{date}.nc")
-
+        # fname = f"/home/chm003/project/hrdps/{date}-{uid}.nc"
+        # ds.to_netcdf(fname, **to_netcdf_kwargs)
+        
         # clean up the tmp files AFTER we have written the nc file out above
-        for f in files_to_remove:
-            os.remove(f)
+        # print('Cleaning up')
+        # for f in files_to_remove:
+        #     # print(f)
+        #     os.remove(f)
 
-        return f"/home/chm003/project/hrdps/{date}.nc"
+        return ds, files_to_remove
 
 
 
 def extract_day(year, month, day):
 
     all_day = []
+    files_to_remove = []
     # holds the datetime string format
     current_day = f'{str(year)}{str(month).zfill(2)}{str(day).zfill(2)}'
-
+    
     for hour in range(0,25): # only want until 11pm, however we need the next ts to produce a deaccum precip
-        all_day.append(extract_hour(year, month, day, hour))
+        d,frm = extract_hour(year, month, day, hour)
+        all_day.append(d)
 
-    ds = xr.open_mfdataset(all_day, combine='nested', concat_dim='time')
+        files_to_remove.extend(frm)
+
+    # print(all_day)
+    ds = xr.concat(all_day, dim="time", join='override')
+    # ds = xr.open_mfdataset(all_day, combine='nested', concat_dim='time', join='override')
 
     if 'PR' in ds.data_vars:
         ds = deaccum_precip(ds) # deaccumulate the precip into hourly sums
 
+    # ensure the CF remains correctly nammed and CF compliant. 
+    ds = set_CF_standard_names(ds) # sets all the CF names into attrs
+    ds = set_CF_encoding(ds) # sets CF coord encoding
+    ds.attrs = {"Conventions": "CF-1.7"}
+
     ds = ds.isel(time=slice(0,24)) #chop off the unneeded 25th timesteps, on keep 00-23
-    print(ds.sel(latitude=52,longitude=-132,method="nearest").TT.values)
+    
+    # sanity check
+    # print(ds.sel(latitude=52,longitude=-132,method="nearest").TT.values)
+
     to_netcdf_kwargs = gen_nc_kwargs(ds)
     ds.to_netcdf(f"/home/chm003/project/hrdps/{current_day}.nc", **to_netcdf_kwargs)
+
+    for f in files_to_remove:
+        os.remove(f)    
 
