@@ -74,6 +74,7 @@ def correct_wind_rotation(ds, pole_lon, pole_lat):
 
     rotation_angle = calculate_rotation_angle(ds.longitude, ds.latitude, pole_lon, pole_lat)
 
+    # This is 1 single time step, so time=0 just selects the single time 
     U_rotated, V_rotated = rotate_wind(ds.isel(time=0).UU, ds.isel(time=0).VV, rotation_angle)
     U_rotated = U_rotated * conversion_kts_ms
     V_rotated = V_rotated * conversion_kts_ms
@@ -81,7 +82,9 @@ def correct_wind_rotation(ds, pole_lon, pole_lat):
     dirog = np.arctan2(ds.isel(time=0).UU, ds.isel(time=0).VV) * (180 / np.pi)
     dirog = (dirog + 360) % 360
 
-    wind_from_direction = np.arctan2(U_rotated, V_rotated) * (180 / np.pi)
+    # met wind from sign convention
+    # https://mst.nerc.ac.uk/wind_vect_convs.html
+    wind_from_direction = np.arctan2(-U_rotated, -V_rotated) * (180 / np.pi)
     wind_from_direction = (wind_from_direction + 360) % 360
 
     wind_speed = xr.Dataset({"wind_speed":np.sqrt(U_rotated**2+V_rotated**2)}).expand_dims(dim="time").assign_coords(time=pd.to_datetime(ds.time.values))
@@ -318,4 +321,7 @@ def extract_day(year, month, day):
 
     for f in files_to_remove:
         os.remove(f)    
+
+
+# %%
 
