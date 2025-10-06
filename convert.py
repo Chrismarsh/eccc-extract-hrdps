@@ -194,15 +194,15 @@ def extract_hour(year, month, day, hour):
         variables = ['rotated_pole', 'GZ', 'TT', 'FI', 'FB', 'FSD', 'FSF', 'PR', 'RN', 'P0', 'HU']
         variables_wind = ['UU', 'VV']
 
-        # Take wind at 40m (0.985) but everything else at surface 1m
+        # Take wind at 40m (0.995) but everything else at surface 1.5 m (level=1)
         if 'level1' in fst.coords:
-            fst = xr.merge([fst[variables_wind].isel(level1=0), fst[variables].isel(level1=1)], compat='override') #.drop_vars('level1')
+            fst = xr.merge([fst[variables_wind].sel(level1=0.995), fst[variables].sel(level1=1)], compat='override') #.drop_vars('level1')
             try:
                 fst = fst.drop_vars('level1')
             except:
                 pass
         else:
-            fst = xr.merge([fst[variables_wind].isel(level=0), fst[variables].isel(level=1)], compat='override') #.drop_vars('level')
+            fst = xr.merge([fst[variables_wind].sel(level=0.995), fst[variables].sel(level=1)], compat='override') #.drop_vars('level')
             
             try:
                 fst = fst.drop_vars('level')
@@ -252,7 +252,8 @@ def extract_hour(year, month, day, hour):
             # remove this file later once we've finished the delayed append
             files_to_remove.append(fname_eps4326)
 
-        ds = xr.merge(all)
+        aligned = xr.align(*all, join="override")
+        ds = xr.merge(aligned)
 
         if 'UU' in ds.data_vars and 'VV' in ds.data_vars:
             # correct the U and V components for the rotateion
@@ -317,7 +318,7 @@ def extract_day(year, month, day):
     # print(ds.sel(latitude=52,longitude=-132,method="nearest").TT.values)
 
     to_netcdf_kwargs = gen_nc_kwargs(ds)
-    ds.to_netcdf(f"/home/chm003/project/hrdps/{current_day}.nc", **to_netcdf_kwargs)
+    ds.to_netcdf(f"/home/chm003/project/hrdps/all/{current_day}.nc", **to_netcdf_kwargs)
 
     for f in files_to_remove:
         os.remove(f)    
