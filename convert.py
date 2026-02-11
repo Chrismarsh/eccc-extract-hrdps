@@ -15,7 +15,7 @@ from metpy.units import units
 import calendar
 import asyncio
 import uuid
-
+import re
 
 
 def gen_nc_kwargs(ds):
@@ -167,6 +167,39 @@ def deaccum_precip(ds):
     ds['PR'] = ds.PR.diff(dim="time", n=1, label='lower')
     return ds
 
+# Some of the fst files have multiple levels and might look like
+# * level1 (level1) float32 1.0
+# * level2 (level2) float32 0.995 1.0
+# while others might only have levels or levels1
+# either way, we want the one with the 0.995 and 1.0 levels, and to drop the rest
+def _pick_level_coord(ds, target_vals=(0.995, 1.0), prefix="level"):
+    """Return the name of the coord/dim that contains all target_vals, else None."""
+    targets = list(target_vals)
+
+    # Consider coord names: level, level1, level2, ...
+    candidates = [c for c in ds.coords if c == prefix or re.match(rf"^{re.escape(prefix)}\d+$", c)]
+    # Also consider dims named like that (in case it's a dim but not a coord)
+    candidates += [d for d in ds.dims if d not in candidates and (d == prefix or re.match(rf"^{re.escape(prefix)}\d+$", d))]
+
+    for name in candidates:
+        if name in ds.coords:
+            vals = ds.coords[name].values
+        else:
+            # dim without coord: can't test values
+            continue
+
+        # flatten + numeric compare with tolerance
+        vals = np.asarray(vals).ravel()
+        if all(np.isclose(vals, t, rtol=0, atol=1e-6).any() for t in targets):
+            return name
+
+    return None
+
+def _drop_other_level_coords(ds, keep_name, prefix="level"):
+    """Drop all coords named level*, except keep_name."""
+    drop = [c for c in ds.coords if (c == prefix or c.startswith(prefix)) and c != keep_name]
+    return ds.drop_vars(drop, errors="ignore")
+
 
 def extract_hour(year, month, day, hour):
 
@@ -183,7 +216,7 @@ def extract_hour(year, month, day, hour):
         # FSD: Incoming direct shortwave radiation at the surface (W/m2)
         # FSF: Incoming diffuse shortwave radiation at the surface (W/m2)
         # PR:  Total precipitation (m)
-        # RN:  Liquid precipitationa (m)
+        # RN:  Liquid precipitation (m)
         # P0:  Pressure at the surface (mb)
         # HU:  Specific humidity (kg/kg)
         # TT:  Air temp (C)
@@ -194,20 +227,18 @@ def extract_hour(year, month, day, hour):
         variables = ['rotated_pole', 'GZ', 'TT', 'FI', 'FB', 'FSD', 'FSF', 'PR', 'RN', 'P0', 'HU']
         variables_wind = ['UU', 'VV']
 
+        level_name = _pick_level_coord(fst, target_vals=(0.995, 1.0), prefix="level")
+        if level_name is None:
+            raise ValueError("Could not find a level* coordinate containing both 0.995 and 1.0")
+
         # Take wind at 40m (0.995) but everything else at surface 1.5 m (level=1)
-        if 'level1' in fst.coords:
-            fst = xr.merge([fst[variables_wind].sel(level1=0.995), fst[variables].sel(level1=1)], compat='override') #.drop_vars('level1')
-            try:
-                fst = fst.drop_vars('level1')
-            except:
-                pass
-        else:
-            fst = xr.merge([fst[variables_wind].sel(level=0.995), fst[variables].sel(level=1)], compat='override') #.drop_vars('level')
-            
-            try:
-                fst = fst.drop_vars('level')
-            except:
-                pass
+        fst = xr.merge([
+                fst[variables_wind].sel({level_name: 0.995}),
+                fst[variables].sel({level_name: 1.0})
+            ], compat='override')
+
+        # drop the remaining levels we don't need
+        fst = _drop_other_level_coords(fst, keep_name=level_name, prefix="level")
 
         variables.extend(variables_wind)
 
